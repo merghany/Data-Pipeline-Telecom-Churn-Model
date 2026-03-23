@@ -10,8 +10,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
       MYSQL_DATABASE: telecom_churn
-      MYSQL_USER: churn_user
-      MYSQL_PASSWORD: churn_pass
+      MYSQL_USER: pg_user
+      MYSQL_PASSWORD: pg_password_2024
     ports:
       - "3306:3306"
     volumes:
