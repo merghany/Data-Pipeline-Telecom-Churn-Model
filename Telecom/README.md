@@ -39,8 +39,8 @@ Open http://localhost:8080 in your browser:
 |----------|----------------|
 | System   | MySQL          |
 | Server   | mysql          |
-| Username | churn_user     |
-| Password | churn_pass     |
+| Username | pg_user     |
+| Password | pg_password_2024     |
 | Database | telecom_churn  |
 
 ---
@@ -72,8 +72,8 @@ Open http://localhost:8080 in your browser:
 | Host      | localhost      |
 | Port      | 3306           |
 | Database  | telecom_churn  |
-| User      | churn_user     |
-| Password  | churn_pass     |
+| User      | pg_user     |
+| Password  | pg_password_2024     |
 | Root PW   | rootpassword   |
 
 ---

@@ -271,8 +271,8 @@ def main():
     parser.add_argument("--customers", type=int, default=500,   help="Number of customers (default 500)")
     parser.add_argument("--host",      default="localhost",     help="MySQL host")
     parser.add_argument("--port",      type=int, default=3306,  help="MySQL port")
-    parser.add_argument("--user",      default="churn_user",    help="MySQL user")
-    parser.add_argument("--password",  default="churn_pass",    help="MySQL password")
+    parser.add_argument("--user",      default="pg_user",    help="MySQL user")
+    parser.add_argument("--password",  default="pg_password_2024",    help="MySQL password")
     parser.add_argument("--database",  default="telecom_churn", help="MySQL database")
     args = parser.parse_args()
 

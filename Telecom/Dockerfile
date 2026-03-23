@@ -12,7 +12,7 @@ COPY generate_churn_data.py .
 CMD ["python", "generate_churn_data.py", \
      "--host",     "mysql", \
      "--port",     "3306", \
-     "--user",     "churn_user", \
-     "--password", "churn_pass", \
+     "--user",     "pg_user", \
+     "--password", "pg_password_2024", \
      "--database", "telecom_churn", \
      "--customers","500"]
