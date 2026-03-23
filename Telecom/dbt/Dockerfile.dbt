@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+# System deps for pg_isready and psycopg2
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install dbt-postgres
+RUN pip install --no-cache-dir \
+    dbt-postgres==1.7.* \
+    dbt-utils
+
+WORKDIR /dbt
+
+# Copy project files
+COPY telecom_churn/ ./telecom_churn/
+COPY dbt_runner.sh  ./dbt_runner.sh
+
+RUN chmod +x ./dbt_runner.sh
+
+CMD ["./dbt_runner.sh"]

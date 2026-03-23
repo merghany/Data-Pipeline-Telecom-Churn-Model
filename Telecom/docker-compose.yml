@@ -1,32 +1,73 @@
-version: '3.8'
+version: '3.9'
+
+# ═══════════════════════════════════════════════════════════════
+#  Telecom Churn — Full CDC Pipeline
+#
+#  Data flow:
+#  MySQL (binlog) → Debezium → Kafka → Kafka Connect (JDBC Sink)
+#                                    → Postgres (raw schema)
+#                                    → dbt (staging → intermediate → marts)
+#
+#  Services:
+#    mysql              Source database (binlog enabled)
+#    data_generator     One-shot historical data loader
+#    data_streamer      Continuous live event streamer (1/sec)
+#    zookeeper          Kafka coordination
+#    kafka              Message broker
+#    kafka-connect      Debezium source + JDBC sink connectors
+#    connector_setup    Registers connectors via REST API (exits)
+#    postgres           Analytics target database for dbt
+#    dbt                Transforms raw CDC data every 5 minutes
+#    kafka-ui           Browse Kafka topics (http://localhost:8090)
+#    adminer            Browse MySQL    (http://localhost:8080)
+# ═══════════════════════════════════════════════════════════════
+
+x-kafka-connect-base: &kafka-connect-base
+  CONNECT_BOOTSTRAP_SERVERS: "kafka:29092"
+  CONNECT_REST_PORT: "8083"
+  CONNECT_GROUP_ID: "telecom-connect-group"
+  CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
+  CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
+  CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
+  CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+  CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+  CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+  CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+  CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+  CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+  CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+  CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components,/data/connect-jars"
+  CONNECT_LOG4J_ROOT_LOGLEVEL: "WARN"
+  CONNECT_LOG4J_LOGGERS: "org.apache.kafka.connect.runtime.rest=WARN,org.reflections=ERROR"
 
 services:
 
-  # ── MySQL Database ──────────────────────────────────────────
+  # ── MySQL (source) ────────────────────────────────────────────
   mysql:
     image: mysql:8.0
-    container_name: telecom_churn_db
+    container_name: telecom_mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: telecom_churn
-      MYSQL_USER: pg_user
-      MYSQL_PASSWORD: pg_password_2024
+      MYSQL_DATABASE:      telecom_churn
+      MYSQL_USER:          churn_user
+      MYSQL_PASSWORD:      churn_pass
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./init:/docker-entrypoint-initdb.d
+      - ./init:/docker-entrypoint-initdb.d      # 01_schema.sql + 02_debezium_user.sql
+      - ./mysql.cnf:/etc/mysql/conf.d/cdc.cnf   # binlog config
     networks:
-      - churn_network
+      - telecom_net
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 40s
 
-  # ── One-time bulk loader (seeds 1 year of history, then exits) ──
+  # ── Historical bulk loader (runs once, then exits) ────────────
   data_generator:
     build:
       context: .
@@ -35,58 +76,271 @@ services:
     restart: "no"
     command: >
       python generate_churn_data.py
-        --host     mysql
-        --port     3306
-        --user     pg_user
-        --password pg_password_2024
-        --database telecom_churn
-        --customers 500
+        --host mysql --port 3306
+        --user churn_user --password churn_pass
+        --database telecom_churn --customers 500
     depends_on:
       mysql:
         condition: service_healthy
     networks:
-      - churn_network
+      - telecom_net
 
-  # ── Live streamer (runs forever, 1 tick/sec) ────────────────
+  # ── Live event streamer (1 tick / second, runs forever) ───────
   data_streamer:
     build:
       context: .
       dockerfile: Dockerfile.streamer
     container_name: telecom_data_streamer
-    restart: unless-stopped          # auto-restart if it crashes
+    restart: unless-stopped
     command: >
       python stream_churn_data.py
-        --host     mysql
-        --port     3306
-        --user     pg_user
-        --password pg_password_2024
+        --host mysql --port 3306
+        --user churn_user --password churn_pass
         --database telecom_churn
-        --interval 1.0
-        --events   3
-        --verbose
+        --interval 1.0 --events 3 --verbose
     depends_on:
       mysql:
         condition: service_healthy
     networks:
-      - churn_network
+      - telecom_net
 
-  # ── Adminer Web UI ──────────────────────────────────────────
+  # ── Zookeeper ─────────────────────────────────────────────────
+  zookeeper:
+    image:  confluentinc/cp-zookeeper:7.9.6
+    container_name: telecom_zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME:   2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    networks:
+      - telecom_net
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka broker ──────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.9.6
+    container_name: telecom_kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS:           "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME:     "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168        # 7 days
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - telecom_net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka Connect (Debezium source + JDBC sink) ───────────────
+  kafka-connect:
+    image: debezium/connect:2.4
+    container_name: telecom_kafka_connect
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *kafka-connect-base
+      BOOTSTRAP_SERVERS:  "kafka:29092"
+      GROUP_ID:           "telecom-connect-group"
+      CONFIG_STORAGE_TOPIC:  "connect-configs"
+      OFFSET_STORAGE_TOPIC:  "connect-offsets"
+      STATUS_STORAGE_TOPIC:  "connect-status"
+    ports:
+      - "8083:8083"
+    volumes:
+      - ./debezium:/connectors                 # connector JSON files
+      - kafka_connect_data:/kafka/connect
+    networks:
+      - telecom_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ── JDBC Sink (Confluent) — writes CDC events to Postgres ─────
+  # Uses a separate Confluent Kafka Connect worker with JDBC plugin
+  kafka-connect-sink:
+    image: confluentinc/cp-kafka-connect:7.9.6
+    container_name: telecom_kafka_connect_sink
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *kafka-connect-base
+      CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect-sink"
+      CONNECT_REST_PORT: "8084"
+    ports:
+      - "8084:8084"
+    volumes:
+      - ./debezium:/connectors
+    command:
+      - bash
+      - -c
+      - |
+        confluent-hub install --no-prompt confluentinc/kafka-connect-jdbc:10.7.4
+        /etc/confluent/docker/run
+    networks:
+      - telecom_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8084/connectors || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # ── Connector registration (runs once, exits) ─────────────────
+  connector_setup:
+    image: curlimages/curl:8.18.0
+    container_name: telecom_connector_setup
+    restart: "no"
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+      kafka-connect-sink:
+        condition: service_healthy
+    volumes:
+      - ./debezium:/connectors
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        echo "Registering Debezium MySQL source connector..."
+        sleep 5
+        curl -sf -X POST http://kafka-connect:8083/connectors \
+          -H 'Content-Type: application/json' \
+          -d @/connectors/mysql-source-connector.json \
+          && echo "  ✅ Source connector registered" \
+          || echo "  ⚠️  Source connector may already exist"
+
+        echo "Registering Postgres sink connector..."
+        curl -sf -X POST http://kafka-connect-sink:8084/connectors \
+          -H 'Content-Type: application/json' \
+          -d @/connectors/postgres-sink-connector.json \
+          && echo "  ✅ Sink connector registered" \
+          || echo "  ⚠️  Sink connector may already exist"
+
+        echo "✅ Connector setup complete"
+    networks:
+      - telecom_net
+
+  # ── PostgreSQL (analytics target for dbt) ────────────────────
+  postgres:
+    image: postgres:15.17
+    container_name: telecom_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       telecom_dbt
+      POSTGRES_USER:     dbt_user
+      POSTGRES_PASSWORD: dbt_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d   # 01_raw_schema.sql
+    networks:
+      - telecom_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbt_user -d telecom_dbt"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── dbt transformation runner (every 5 minutes) ───────────────
+  dbt:
+    build:
+      context: ./dbt
+      dockerfile: Dockerfile.dbt
+    container_name: telecom_dbt
+    restart: unless-stopped
+    environment:
+      DBT_HOST:     postgres
+      DBT_PORT:     "5432"
+      DBT_USER:     dbt_user
+      DBT_PASSWORD: dbt_pass
+      DBT_DBNAME:   telecom_dbt
+      DBT_INTERVAL: "300"         # seconds between dbt runs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - telecom_net
+
+  # ── Kafka UI (browse topics + messages) ──────────────────────
+  kafka-ui:
+    image: confluentinc/cp-kafka-connect:7.1.0-1-ubi8
+    container_name: telecom_kafka_ui
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME:            telecom
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - telecom_net
+
+  # ── Adminer (browse MySQL) ────────────────────────────────────
   adminer:
-    image: adminer:latest
+    image: adminer:standalone
     container_name: telecom_adminer
     restart: unless-stopped
     ports:
       - "8080:8080"
-    networks:
-      - churn_network
     depends_on:
       mysql:
         condition: service_healthy
+    networks:
+      - telecom_net
 
+# ── Volumes ───────────────────────────────────────────────────
 volumes:
   mysql_data:
-    driver: local
+  postgres_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_connect_data:
 
+# ── Network ───────────────────────────────────────────────────
 networks:
-  churn_network:
+  telecom_net:
     driver: bridge

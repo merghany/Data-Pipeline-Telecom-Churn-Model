@@ -1,0 +1,38 @@
+{
+  "name": "telecom-mysql-source",
+  "config": {
+    "connector.class":                                    "io.debezium.connector.mysql.MySqlConnector",
+    "tasks.max":                                          "1",
+
+    "database.hostname":                                  "mysql",
+    "database.port":                                      "3306",
+    "database.user":                                      "debezium",
+    "database.password":                                  "debezium_pass",
+    "database.server.id":                                 "184054",
+
+    "topic.prefix":                                       "telecom",
+    "database.include.list":                              "telecom_churn",
+    "table.include.list":                                 "telecom_churn.customers,telecom_churn.subscription_plans,telecom_churn.customer_subscriptions,telecom_churn.usage_records,telecom_churn.billing_records,telecom_churn.support_tickets,telecom_churn.network_quality",
+
+    "schema.history.internal.kafka.bootstrap.servers":    "kafka:29092",
+    "schema.history.internal.kafka.topic":                "schema-changes.telecom_churn",
+
+    "snapshot.mode":                                      "initial",
+    "include.schema.changes":                             "true",
+    "decimal.handling.mode":                              "double",
+    "time.precision.mode":                                "connect",
+    "tombstones.on.delete":                               "true",
+    "heartbeat.interval.ms":                              "10000",
+
+    "transforms":                                         "unwrap",
+    "transforms.unwrap.type":                             "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones":                  "false",
+    "transforms.unwrap.delete.handling.mode":             "rewrite",
+    "transforms.unwrap.add.fields":                       "op:_cdc_op,ts_ms:_cdc_ts",
+
+    "key.converter":                                      "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable":                       "true",
+    "value.converter":                                    "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable":                     "true"
+  }
+}

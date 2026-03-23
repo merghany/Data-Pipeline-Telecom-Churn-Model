@@ -1,0 +1,11 @@
+[mysqld]
+# ── Required for Debezium CDC ─────────────────────────────────
+server-id         = 1
+log_bin           = mysql-bin
+binlog_format     = ROW
+binlog_row_image  = FULL
+expire_logs_days  = 3
+
+# ── Performance ───────────────────────────────────────────────
+innodb_buffer_pool_size = 256M
+max_connections         = 200
