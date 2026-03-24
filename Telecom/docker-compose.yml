@@ -56,7 +56,8 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./init:/docker-entrypoint-initdb.d
+      - ./init:/docker-entrypoint-initdb.d      # 01_schema.sql + 02_debezium_user.sql
+      - ./mysql.cnf:/etc/mysql/conf.d/cdc.cnf   # binlog config
     networks:
       - telecom_net
     healthcheck:
@@ -71,7 +72,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: telecom_data_generator
+    container_name: telecom_generator
     restart: "no"
     command: >
       python generate_churn_data.py
@@ -89,7 +90,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.streamer
-    container_name: telecom_data_streamer
+    container_name: telecom_streamer
     restart: unless-stopped
     command: >
       python stream_churn_data.py
@@ -105,7 +106,7 @@ services:
 
   # ── Zookeeper ─────────────────────────────────────────────────
   zookeeper:
-    image:  confluentinc/cp-zookeeper:7.9.6
+    image: confluentinc/cp-zookeeper:7.9.6
     container_name: telecom_zookeeper
     restart: unless-stopped
     environment:
@@ -124,7 +125,7 @@ services:
 
   # ── Kafka broker ──────────────────────────────────────────────
   kafka:
-    image: confluentinc/cp-kafka:7.9.6
+    image: confluentinc/cp-kafka:7.5.0
     container_name: telecom_kafka
     restart: unless-stopped
     depends_on:
@@ -191,7 +192,7 @@ services:
   # ── JDBC Sink (Confluent) — writes CDC events to Postgres ─────
   # Uses a separate Confluent Kafka Connect worker with JDBC plugin
   kafka-connect-sink:
-    image: confluentinc/cp-kafka-connect:7.9.6
+    image: confluentinc/cp-kafka-connect:7.5.0
     container_name: telecom_kafka_connect_sink
     restart: unless-stopped
     depends_on:
@@ -224,7 +225,7 @@ services:
 
   # ── Connector registration (runs once, exits) ─────────────────
   connector_setup:
-    image: curlimages/curl:8.18.0
+    image: curlimages/curl:latest
     container_name: telecom_connector_setup
     restart: "no"
     depends_on:
@@ -258,7 +259,7 @@ services:
 
   # ── PostgreSQL (analytics target for dbt) ────────────────────
   postgres:
-    image: postgres:15.17
+    image: postgres:14.22
     container_name: telecom_postgres
     restart: unless-stopped
     environment:
@@ -301,7 +302,7 @@ services:
 
   # ── Kafka UI (browse topics + messages) ──────────────────────
   kafka-ui:
-    image: confluentinc/cp-kafka-connect:7.1.0-1-ubi8
+    image: provectuslabs/kafka-ui:latest
     container_name: telecom_kafka_ui
     restart: unless-stopped
     ports:
@@ -319,13 +320,11 @@ services:
 
   # ── Adminer (browse MySQL) ────────────────────────────────────
   adminer:
-    image: adminer:latest
+    image: adminer:standalone
     container_name: telecom_adminer
     restart: unless-stopped
     ports:
       - "8080:8080"
-    networks:
-      - churn_network
     depends_on:
       mysql:
         condition: service_healthy
@@ -335,8 +334,13 @@ services:
 # ── Volumes ───────────────────────────────────────────────────
 volumes:
   mysql_data:
-    driver: local
+  postgres_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_connect_data:
 
+# ── Network ───────────────────────────────────────────────────
 networks:
   telecom_net:
     driver: bridge
