@@ -56,8 +56,7 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./init:/docker-entrypoint-initdb.d      # 01_schema.sql + 02_debezium_user.sql
-      - ./mysql.cnf:/etc/mysql/conf.d/cdc.cnf   # binlog config
+      - ./init:/docker-entrypoint-initdb.d
     networks:
       - telecom_net
     healthcheck:
@@ -320,11 +319,13 @@ services:
 
   # ── Adminer (browse MySQL) ────────────────────────────────────
   adminer:
-    image: adminer:standalone
+    image: adminer:latest
     container_name: telecom_adminer
     restart: unless-stopped
     ports:
       - "8080:8080"
+    networks:
+      - churn_network
     depends_on:
       mysql:
         condition: service_healthy
@@ -334,13 +335,8 @@ services:
 # ── Volumes ───────────────────────────────────────────────────
 volumes:
   mysql_data:
-  postgres_data:
-  kafka_data:
-  zookeeper_data:
-  zookeeper_log:
-  kafka_connect_data:
+    driver: local
 
-# ── Network ───────────────────────────────────────────────────
 networks:
   telecom_net:
     driver: bridge
