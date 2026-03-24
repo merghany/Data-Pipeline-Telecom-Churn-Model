@@ -111,14 +111,21 @@ services:
     restart: unless-stopped
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME:   2000
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_MAX_CLIENT_CNXNS: 60
+      ZOOKEEPER_AUTOPURGE_PURGE_INTERVAL: 1
+      ZOOKEEPER_AUTOPURGE_SNAP_RETAIN_COUNT: 3
+    ports:
+    - "2181:2181"
     volumes:
       - zookeeper_data:/var/lib/zookeeper/data
       - zookeeper_log:/var/lib/zookeeper/log
     networks:
       - telecom_net
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok"]
+      test: ["CMD-SHELL", "echo srvr | nc -w 2 localhost 2181 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -157,6 +164,51 @@ services:
       retries: 10
       start_period: 30s
 
+
+  kafka-topics-creator:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: telecom_kafka_topics_creator
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      echo "Waiting for Kafka to be fully ready..."
+      sleep 10
+      
+      echo "Creating Kafka Connect internal topics..."
+      
+      kafka-topics --bootstrap-server kafka:29092 \
+        --create \
+        --topic connect-configs \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config cleanup.policy=compact \
+        --if-not-exists && echo "✅ connect-configs created"
+      
+      kafka-topics --bootstrap-server kafka:29092 \
+        --create \
+        --topic connect-offsets \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config cleanup.policy=compact \
+        --if-not-exists && echo "✅ connect-offsets created"
+      
+      kafka-topics --bootstrap-server kafka:29092 \
+        --create \
+        --topic connect-status \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config cleanup.policy=compact \
+        --if-not-exists && echo "✅ connect-status created"
+      
+      echo "All topics created successfully"
+      echo "Topic creator finished"
+    networks:
+      - telecom_net
+
+
   # ── Kafka Connect (Debezium source) ───────────────────────────
   kafka-connect:
     image: debezium/connect:2.4
@@ -165,10 +217,13 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-topics-creator:
+        condition: service_completed_successfully  # Wait for topics to be created
       mysql:
         condition: service_healthy
     environment:
       <<: *kafka-connect-base
+     
     ports:
       - "8083:8083"
     volumes:
@@ -191,6 +246,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-topics-creator:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -318,16 +375,47 @@ services:
 
   # ── Adminer (browse MySQL) ────────────────────────────────────
   adminer:
-    image: adminer:standalone
+    image: adminer:4.8.1
     container_name: telecom_adminer
     restart: unless-stopped
     ports:
       - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+      ADMINER_DESIGN: dracula
     depends_on:
       mysql:
         condition: service_healthy
     networks:
       - telecom_net
+  metabase:
+    image: metabase/metabase:latest
+    container_name: telecom_metabase
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_TYPE:       postgres
+      MB_DB_HOST:       postgres
+      MB_DB_PORT:       5432
+      MB_DB_DBNAME:     metabase_app
+      MB_DB_USER:       dbt_user
+      MB_DB_PASS:       dbt_pass
+      JAVA_TIMEZONE:    UTC
+      MB_EMOJI_IN_LOGS: "false"
+    volumes:
+      - metabase_data:/metabase-data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - telecom_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
 
 # ── Volumes ───────────────────────────────────────────────────
 volumes:
@@ -338,7 +426,7 @@ volumes:
   zookeeper_log:
   kafka_connect_data:
   kafka_connect_sink_data:
-
+  metabase_data:
 # ── Network ───────────────────────────────────────────────────
 networks:
   telecom_net:

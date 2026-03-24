@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y \
 
 # Install dbt-postgres
 RUN pip install --no-cache-dir \
-    dbt-postgres==1.7.* \
-    dbt-utils
+    dbt-core==1.7.8 \
+    dbt-postgres==1.7.8
 
 WORKDIR /dbt
 
@@ -21,3 +21,32 @@ COPY dbt_runner.sh  ./dbt_runner.sh
 RUN chmod +x ./dbt_runner.sh
 
 CMD ["./dbt_runner.sh"]
+# Create profiles.yml
+RUN mkdir -p /root/.dbt && \
+    echo "telecom_churn:" > /root/.dbt/profiles.yml && \
+    echo "  target: dev" >> /root/.dbt/profiles.yml && \
+    echo "  outputs:" >> /root/.dbt/profiles.yml && \
+    echo "    dev:" >> /root/.dbt/profiles.yml && \
+    echo "      type: postgres" >> /root/.dbt/profiles.yml && \
+    echo "      host: ${DBT_HOST}" >> /root/.dbt/profiles.yml && \
+    echo "      port: ${DBT_PORT}" >> /root/.dbt/profiles.yml && \
+    echo "      user: ${DBT_USER}" >> /root/.dbt/profiles.yml && \
+    echo "      password: ${DBT_PASSWORD}" >> /root/.dbt/profiles.yml && \
+    echo "      dbname: ${DBT_DBNAME}" >> /root/.dbt/profiles.yml && \
+    echo "      schema: public" >> /root/.dbt/profiles.yml && \
+    echo "      threads: 4" >> /root/.dbt/profiles.yml
+
+# Install dbt packages
+WORKDIR /dbt/telecom_churn
+RUN if [ -f "packages.yml" ]; then dbt deps; fi
+
+# Simple loop to run dbt
+CMD while true; do \
+    echo "========================================="; \
+    echo "$(date): Running dbt transformations"; \
+    echo "========================================="; \
+    cd /dbt/telecom_churn && dbt run; \
+    INTERVAL=${DBT_INTERVAL:-300}; \
+    echo "$(date): Waiting ${INTERVAL} seconds"; \
+    sleep ${INTERVAL}; \
+    done
