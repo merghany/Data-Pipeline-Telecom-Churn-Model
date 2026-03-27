@@ -1,0 +1,31 @@
+{
+  "name": "mysql-telecom-source",
+  "config": {
+    "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+    "tasks.max": "1",
+    "database.hostname": "mysql",
+    "database.port": "3306",
+    "database.user": "churn_user",
+    "database.password": "churn_pass",
+    "database.server.id": "184054",
+    "database.server.name": "telecom",
+    "database.include.list": "telecom_churn",
+    "table.include.list": "telecom_churn.customers,telecom_churn.subscription_plans,telecom_churn.customer_subscriptions,telecom_churn.usage_records,telecom_churn.billing_records,telecom_churn.support_tickets,telecom_churn.network_quality",
+    "database.history.kafka.bootstrap.servers": "kafka:29092",
+    "database.history.kafka.topic": "schema-changes.telecom_churn",
+    "include.schema.changes": "true",
+    "snapshot.mode": "initial",
+    "snapshot.locking.mode": "minimal",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "false",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "errors.tolerance": "all",
+    "errors.deadletterqueue.topic.name": "telecom.dlq",
+    "errors.deadletterqueue.context.headers.enable": "true"
+  }
+}

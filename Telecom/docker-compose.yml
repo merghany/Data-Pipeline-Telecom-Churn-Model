@@ -14,15 +14,18 @@ version: '3.9'
 #    data_streamer      Continuous live event streamer (1/sec)
 #    zookeeper          Kafka coordination
 #    kafka              Message broker
-#    kafka-connect      Debezium source + JDBC sink connectors
+#    kafka-init         Pre-creates internal topics (runs once)
+#    kafka-connect      Debezium source connector worker
+#    kafka-connect-sink JDBC sink connector worker
 #    connector_setup    Registers connectors via REST API (exits)
 #    postgres           Analytics target database for dbt
 #    dbt                Transforms raw CDC data every 5 minutes
 #    kafka-ui           Browse Kafka topics (http://localhost:8090)
 #    adminer            Browse MySQL    (http://localhost:8080)
+#    metabase           Analytics dashboard (http://localhost:3000)
 # ═══════════════════════════════════════════════════════════════
-# ── Shared Connect settings (no GROUP_ID or topic names here —
-#    each worker declares its own to avoid cross-cluster contamination)
+
+# ── Shared Connect settings
 x-connect-common: &connect-common
   CONNECT_BOOTSTRAP_SERVERS:                  "kafka:29092"
   CONNECT_KEY_CONVERTER:                      "org.apache.kafka.connect.json.JsonConverter"
@@ -111,7 +114,7 @@ services:
       ZOOKEEPER_AUTOPURGE_PURGE_INTERVAL: 1
       ZOOKEEPER_AUTOPURGE_SNAP_RETAIN_COUNT: 3
     ports:
-    - "2181:2181"
+      - "2181:2181"
     volumes:
       - zookeeper_data:/var/lib/zookeeper/data
       - zookeeper_log:/var/lib/zookeeper/log
@@ -124,20 +127,6 @@ services:
       retries: 5
       start_period: 30s
 
-  # ── Kafka topic initialiser (runs once, exits) ────────────────
-  # Pre-creates all six internal Kafka Connect topics with the correct
-  # partition count, replication factor, and compaction policy.
-  #
-  # Kafka Connect requirements:
-  #   config topic  → 1 partition   · RF=1 · cleanup.policy=compact
-  #   offsets topic → 25 partitions · RF=1 · cleanup.policy=compact
-  #   status topic  → 5 partitions  · RF=1 · cleanup.policy=compact
-  #
-  # RF=1 is intentional for a single-broker dev cluster.
-  # In production (3+ brokers) raise RF to 3 and set min.insync.replicas=2.
-  #
-  # Two workers (Debezium source + JDBC sink) get separate topic sets so they
-  # form independent distributed groups and never share internal state.
   # ── Kafka broker ──────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -156,7 +145,6 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS:       0
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR:          1
-      # Disable auto-creation so kafka-init controls topic config precisely
       KAFKA_AUTO_CREATE_TOPICS_ENABLE:              "false"
       KAFKA_LOG_RETENTION_HOURS:                    168
     ports:
@@ -171,7 +159,8 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
-      
+
+  # ── Kafka topic initializer (runs once, exits) ────────────────
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
     container_name: telecom_kafka_init
@@ -185,7 +174,7 @@ services:
       - ./kafka-init.sh:/kafka-init.sh
     entrypoint: ["bash", "/kafka-init.sh"]
 
-  # ── Kafka Connect — Debezium source worker ────────────────────
+   # ── Kafka Connect — Debezium source worker ────────────────────
   kafka-connect:
     image: debezium/connect:2.4
     container_name: telecom_kafka_connect
@@ -198,22 +187,30 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      <<: *connect-common
-      # Worker identity — must be unique across all Connect workers
-      CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect"
-      CONNECT_REST_PORT:                 "8083"
-      CONNECT_GROUP_ID:                  "debezium-source-group"
-      # Internal topics — 1 partition + compacted (pre-created by kafka-init)
-      CONNECT_CONFIG_STORAGE_TOPIC:               "debezium-connect-configs"
-      CONNECT_OFFSET_STORAGE_TOPIC:               "debezium-connect-offsets"
-      CONNECT_STATUS_STORAGE_TOPIC:               "debezium-connect-status"
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR:  "1"
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR:  "1"
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR:  "1"
+      # Debezium Connect uses different variable names than Confluent
+      BOOTSTRAP_SERVERS: "kafka:29092"
+      GROUP_ID: "debezium-source-group"
+      CONFIG_STORAGE_TOPIC: "debezium-connect-configs"
+      OFFSET_STORAGE_TOPIC: "debezium-connect-offsets"
+      STATUS_STORAGE_TOPIC: "debezium-connect-status"
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      # Converters
+      KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      ENABLE_DEBEZIUM_SCRIPTING: "true"
+      # REST API
+      REST_ADVERTISED_HOST_NAME: "kafka-connect"
+      REST_PORT: "8083"
+      # Plugin path
+      CONNECT_PLUGIN_PATH: "/kafka/connect,/usr/share/java,/usr/share/confluent-hub-components"
+      # Logging
+      LOG_LEVEL: "WARN"
     ports:
       - "8083:8083"
     volumes:
-      - ./debezium:/connectors
+      - ./connectors:/connectors:ro
       - kafka_connect_data:/kafka/connect
     networks:
       - telecom_net
@@ -236,11 +233,9 @@ services:
         condition: service_healthy
     environment:
       <<: *connect-common
-      # Worker identity — separate group from Debezium worker
       CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect-sink"
       CONNECT_REST_PORT:                 "8084"
       CONNECT_GROUP_ID:                  "jdbc-sink-group"
-      # Internal topics — separate set from Debezium worker (pre-created by kafka-init)
       CONNECT_CONFIG_STORAGE_TOPIC:               "jdbc-connect-configs"
       CONNECT_OFFSET_STORAGE_TOPIC:               "jdbc-connect-offsets"
       CONNECT_STATUS_STORAGE_TOPIC:               "jdbc-connect-status"
@@ -250,7 +245,7 @@ services:
     ports:
       - "8084:8084"
     volumes:
-      - ./debezium:/connectors
+      - ./connectors:/connectors:ro
     command: ["bash", "-c", "confluent-hub install --no-prompt confluentinc/kafka-connect-jdbc:10.7.4 && /etc/confluent/docker/run"]
     networks:
       - telecom_net
@@ -272,12 +267,13 @@ services:
       kafka-connect-sink:
         condition: service_healthy
     volumes:
-      - ./debezium:/connectors
-      - ./connector-setup.sh:/connector-setup.sh
+      - ./connectors:/connectors:ro
+      - ./connector-setup.sh:/connector-setup.sh:ro
     entrypoint: ["sh", "/connector-setup.sh"]
     networks:
       - telecom_net
-# ── PostgreSQL (analytics target for dbt) ────────────────────
+
+  # ── PostgreSQL (analytics target for dbt) ────────────────────
   postgres:
     image: postgres
     container_name: telecom_postgres
@@ -353,6 +349,8 @@ services:
         condition: service_healthy
     networks:
       - telecom_net
+
+  # ── Metabase (analytics dashboard) ───────────────────────────
   metabase:
     image: metabase/metabase:v0.60.x
     container_name: telecom_metabase
@@ -390,8 +388,8 @@ volumes:
   zookeeper_data:
   zookeeper_log:
   kafka_connect_data:
-  kafka_connect_sink_data:
   metabase_data:
+
 # ── Network ───────────────────────────────────────────────────
 networks:
   telecom_net:

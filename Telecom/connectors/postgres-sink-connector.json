@@ -1,0 +1,26 @@
+{
+  "name": "postgres-telecom-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "connection.url": "jdbc:postgresql://postgres:5432/telecom_dbt",
+    "connection.user": "dbt_user",
+    "connection.password": "dbt_pass",
+    "topics": "telecom.telecom_churn.customers,telecom.telecom_churn.subscription_plans,telecom.telecom_churn.customer_subscriptions,telecom.telecom_churn.usage_records,telecom.telecom_churn.billing_records,telecom.telecom_churn.support_tickets,telecom.telecom_churn.network_quality",
+    "topics.regex": "",
+    "table.name.format": "raw.${topic}",
+    "insert.mode": "upsert",
+    "pk.mode": "record_key",
+    "pk.fields": "",
+    "auto.create": "true",
+    "auto.evolve": "true",
+    "batch.size": "100",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+    "errors.tolerance": "all",
+    "errors.deadletterqueue.topic.name": "telecom.dlq",
+    "errors.deadletterqueue.context.headers.enable": "true"
+  }
+}
